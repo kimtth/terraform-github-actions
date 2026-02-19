@@ -1,0 +1,6 @@
+### POST Echo (Azure)
+# VSCode REST Client example for testing the Azure Function deployed in this sample.
+POST https://<your-function-app-endpoint>.azurewebsites.net/api/echo
+Content-Type: text/plain
+
+Hello Azure
