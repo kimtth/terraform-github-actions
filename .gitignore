@@ -46,3 +46,9 @@ terraform.rc
 tfplan
 terraform.tfvars
 *.hcl
+
+uv.lock
+.venv
+.python-version
+pyproject.toml
+main.py

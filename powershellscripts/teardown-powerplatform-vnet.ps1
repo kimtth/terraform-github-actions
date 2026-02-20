@@ -74,9 +74,15 @@ param (
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# Connect to the correct tenant.
+# Clear all cached Az contexts to prevent a previously cached account (e.g. a corporate
+# account with access to many tenants) from being reused instead of the intended account.
+# This forces an interactive login where the correct account can be selected.
+if ($PSCmdlet.ShouldProcess("existing Az contexts", "Clear-AzContext")) {
+    Clear-AzContext -Force | Out-Null
+}
 if ($PSCmdlet.ShouldProcess("tenant $TenantId", "Connect-AzAccount")) {
     Connect-AzAccount -TenantId $TenantId -Subscription $SubscriptionId | Out-Null
+    Set-AzContext -TenantId $TenantId -Subscription $SubscriptionId | Out-Null
 }
 
 # ─── Step 0: Install / import the module ─────────────────────────────────────
@@ -104,8 +110,7 @@ Write-Host "      Policy ARM ID: $PolicyArmId"
 
 if ($PSCmdlet.ShouldProcess($EnvironmentId, "Disable-SubnetInjection")) {
     Disable-SubnetInjection `
-        -EnvironmentId $EnvironmentId `
-        -PolicyArmId   $PolicyArmId
+        -EnvironmentId $EnvironmentId
 }
 
 # ─── Step 2: Delete the enterprise policy ARM resource ───────────────────────
@@ -129,10 +134,13 @@ Write-Host "      VNet  : $VirtualNetworkName"
 Write-Host "      Subnet: $SubnetName"
 
 if ($PSCmdlet.ShouldProcess("$VirtualNetworkName/$SubnetName", "Remove-VnetForSubnetDelegation")) {
-    Remove-VnetForSubnetDelegation `
-        -SubscriptionId     $SubscriptionId `
-        -VirtualNetworkName $VirtualNetworkName `
-        -SubnetName         $SubnetName
+    $removeParams = @{
+        SubscriptionId     = $SubscriptionId
+        ResourceGroupName  = $ResourceGroupName
+        VirtualNetworkName = $VirtualNetworkName
+        SubnetName         = $SubnetName
+    }
+    Remove-VnetForSubnetDelegation @removeParams
 }
 
 Write-Host "`n[3b/3] Removing subnet delegation registration (secondary)..."
@@ -140,10 +148,13 @@ Write-Host "      VNet  : $SecondaryVirtualNetworkName"
 Write-Host "      Subnet: $SecondarySubnetName"
 
 if ($PSCmdlet.ShouldProcess("$SecondaryVirtualNetworkName/$SecondarySubnetName", "Remove-VnetForSubnetDelegation")) {
-    Remove-VnetForSubnetDelegation `
-        -SubscriptionId     $SubscriptionId `
-        -VirtualNetworkName $SecondaryVirtualNetworkName `
-        -SubnetName         $SecondarySubnetName
+    $removeSecondaryParams = @{
+        SubscriptionId     = $SubscriptionId
+        ResourceGroupName  = $ResourceGroupName
+        VirtualNetworkName = $SecondaryVirtualNetworkName
+        SubnetName         = $SecondarySubnetName
+    }
+    Remove-VnetForSubnetDelegation @removeSecondaryParams
 }
 
 Write-Host "`nDone. Power Platform VNet integration has been removed." -ForegroundColor Yellow

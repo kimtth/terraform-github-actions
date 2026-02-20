@@ -6,21 +6,7 @@ terraform {
       source  = "hashicorp/azurerm"
       version = ">=4.1.0"
     }
-    # Used to zip the Azure Functions source code for deployment
-    archive = {
-      source  = "hashicorp/archive"
-      version = ">=2.7.1"
-    }
-    # Used to generate a unique suffix for globally-unique resource names
-    random = {
-      source  = "hashicorp/random"
-      version = ">=3.6.0"
-    }
-    # Used to delay blob upload until Azure RBAC propagation completes
-    time = {
-      source  = "hashicorp/time"
-      version = ">=0.12.0"
-    }
+
   }
 
   # Update this block with the location of your terraform state file

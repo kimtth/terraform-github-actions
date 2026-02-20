@@ -27,7 +27,7 @@ resource "azurerm_subnet" "azppf-ppf-subnet" {
   }
 }
 
-# Dedicated subnet for Azure Functions VNet integration
+# Dedicated subnet for ACI VNet injection
 resource "azurerm_subnet" "azppf-fn-subnet" {
   name                 = var.functions_subnet_name
   resource_group_name  = azurerm_resource_group.azppf-rg.name
@@ -37,7 +37,7 @@ resource "azurerm_subnet" "azppf-fn-subnet" {
   delegation {
     name = "fn-delegation"
     service_delegation {
-      name    = "Microsoft.Web/serverFarms"
+      name    = "Microsoft.ContainerInstance/containerGroups"
       actions = ["Microsoft.Network/virtualNetworks/subnets/action"]
     }
   }

@@ -98,3 +98,30 @@ resource "azurerm_subnet_network_security_group_association" "azppf-ppf-sga-seco
   subnet_id                 = azurerm_subnet.azppf-ppf-subnet-secondary[0].id
   network_security_group_id = azurerm_network_security_group.azppf-sg-secondary[0].id
 }
+
+# ─── VNet Peering ─────────────────────────────────────────────────────────────
+# Power Platform workers injected into the secondary VNet (japanwest) must be
+# able to reach the ACI at 10.123.2.4 which lives in the primary VNet (japaneast).
+# Without peering, secondary workers have no route to the ACI and all flows
+# routed there return 502. Peering is bidirectional and requires one resource on
+# each side.
+
+resource "azurerm_virtual_network_peering" "azppf-primary-to-secondary" {
+  count                        = var.enable_secondary_vnet ? 1 : 0
+  name                         = "azppf-primary-to-secondary"
+  resource_group_name          = azurerm_resource_group.azppf-rg.name
+  virtual_network_name         = azurerm_virtual_network.azppf-vn.name
+  remote_virtual_network_id    = azurerm_virtual_network.azppf-vn-secondary[0].id
+  allow_virtual_network_access = true
+  allow_forwarded_traffic      = true
+}
+
+resource "azurerm_virtual_network_peering" "azppf-secondary-to-primary" {
+  count                        = var.enable_secondary_vnet ? 1 : 0
+  name                         = "azppf-secondary-to-primary"
+  resource_group_name          = azurerm_resource_group.azppf-rg.name
+  virtual_network_name         = azurerm_virtual_network.azppf-vn-secondary[0].name
+  remote_virtual_network_id    = azurerm_virtual_network.azppf-vn.id
+  allow_virtual_network_access = true
+  allow_forwarded_traffic      = true
+}

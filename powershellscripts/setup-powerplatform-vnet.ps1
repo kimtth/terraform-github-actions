@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Configures Power Platform VNet integration enterprise policy after Terraform apply.
 
@@ -6,9 +6,9 @@
     Implements the three-step PowerShell setup from:
     https://learn.microsoft.com/en-us/power-platform/admin/vnet-support-setup-configure?pivots=powershell
 
-    Step 1 – Register the existing delegated subnet with Power Platform.
-    Step 2 – Create the enterprise policy in the resource group.
-    Step 3 – Link the policy to the target Power Platform environment.
+    Step 1 - Register the existing delegated subnet with Power Platform.
+    Step 2 - Create the enterprise policy in the resource group.
+    Step 3 - Link the policy to the target Power Platform environment.
 
 .PREREQUISITES
     - Power Platform administrator role (Entra)
@@ -17,8 +17,10 @@
     - Terraform must have been applied successfully so the VNet/subnet exist.
 
 .PARAMETER EnvironmentId
-    The Power Platform environment ID (GUID).
+    The Power Platform environment ID.
     Find it in: Power Platform admin center > Environments > <env> > Settings > Details.
+    For the default environment the value includes a "Default-" prefix (e.g. "Default-<guid>").
+    For non-default environments it is a plain GUID.
 
 .PARAMETER TenantId
     Azure AD tenant ID. Run: az account show --query tenantId
@@ -31,13 +33,13 @@
     Azure resource group name. Defaults to the Terraform default.
 
 .PARAMETER VirtualNetworkName
-    Name of the primary VNet (eastus) created by Terraform. Defaults to the Terraform default.
+    Name of the primary VNet created by Terraform. Defaults to the Terraform default.
 
 .PARAMETER SubnetName
     Name of the Power Platform delegated subnet in the primary VNet. Defaults to the Terraform default.
 
 .PARAMETER SecondaryVirtualNetworkName
-    Name of the secondary VNet (westus). Required for US geography (unitedstates).
+    Name of the secondary VNet. Required for two-region geographies (e.g. US, Japan).
     Defaults to the Terraform default. Set enable_secondary_vnet = true in tfvars first.
 
 .PARAMETER SecondarySubnetName
@@ -48,7 +50,7 @@
 
 .PARAMETER PolicyLocation
     Power Platform geography for the enterprise policy.
-    This is a Power Platform-specific value — NOT an Azure region name.
+    This is a Power Platform-specific value - NOT an Azure region name.
     Find it in Power Platform admin center > Environments > <env> > Settings > Details > Region.
     Examples: "unitedstates", "japan", "europe", "australia"
     See: https://learn.microsoft.com/en-us/power-platform/admin/vnet-support-overview#supported-regions
@@ -57,7 +59,12 @@
     .\setup-powerplatform-vnet.ps1 `
         -EnvironmentId  "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" `
         -TenantId       "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy" `
-        -SubscriptionId "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz"
+        -SubscriptionId "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz" `
+        -PolicyLocation "japan"
+
+    Note: For the default environment the ID includes a "Default-" prefix.
+    For non-default environments use a plain GUID.
+    Find the value in: Power Platform admin center > Environments > <env> > Settings > Details > Environment ID.
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
@@ -71,12 +78,12 @@ param (
     [Parameter(Mandatory = $true)]
     [string] $SubscriptionId,
 
-    [string] $ResourceGroupName          = "azppf-rg",
-    [string] $VirtualNetworkName         = "azppf-vnet",
-    [string] $SubnetName                 = "azppf-ppf-subnet",
+    [string] $ResourceGroupName           = "azppf-rg",
+    [string] $VirtualNetworkName          = "azppf-vnet",
+    [string] $SubnetName                  = "azppf-ppf-subnet",
     [string] $SecondaryVirtualNetworkName = "azppf-vnet-secondary",
-    [string] $SecondarySubnetName        = "azppf-ppf-subnet",
-    [string] $PolicyName                 = "azppf-enterprise-policy",
+    [string] $SecondarySubnetName         = "azppf-ppf-subnet",
+    [string] $PolicyName                  = "azppf-enterprise-policy",
 
     [Parameter(Mandatory = $true)]
     [string] $PolicyLocation
@@ -85,17 +92,20 @@ param (
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# Connect to the correct tenant so the module uses the right Azure context.
-# Without -TenantId the module may pick up a cached context from a different tenant.
+# Clear all cached Az contexts to prevent a previously cached account from being reused.
+# This forces an interactive login where the correct account can be selected.
+if ($PSCmdlet.ShouldProcess("existing Az contexts", "Clear-AzContext")) {
+    Clear-AzContext -Force | Out-Null
+}
 if ($PSCmdlet.ShouldProcess("tenant $TenantId", "Connect-AzAccount")) {
     Connect-AzAccount -TenantId $TenantId -Subscription $SubscriptionId | Out-Null
+    Set-AzContext -TenantId $TenantId -Subscription $SubscriptionId | Out-Null
 }
 
-# ─── Step 0: Install / import the module ─────────────────────────────────────
+# --- Step 0: Install / import the module -------------------------------------
 
 # Workaround: Microsoft.PowerPlatform.EnterprisePolicies references $Global:InPesterExecution
 # without initialising it. StrictMode -Version Latest treats this as a terminating error.
-# Set the variable before import and temporarily relax StrictMode for the import call.
 $Global:InPesterExecution = $false
 
 if (-not (Get-Module -ListAvailable -Name "Microsoft.PowerPlatform.EnterprisePolicies")) {
@@ -106,10 +116,13 @@ Set-StrictMode -Off
 Import-Module Microsoft.PowerPlatform.EnterprisePolicies
 Set-StrictMode -Version Latest
 
-# ─── Step 1: Register the existing delegated subnets with Power Platform ──────────────────
-# Docs: "Configure your virtual network and subnet for delegation to Power Platform."
-# Run once per virtual network that contains a delegated subnet.
-# US geography (unitedstates) requires both a primary (eastus) and secondary (westus) VNet.
+# Pre-compute resource IDs used across steps.
+$VNetResourceId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName" +
+                  "/providers/Microsoft.Network/virtualNetworks/$VirtualNetworkName"
+$SecondaryVNetResourceId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName" +
+                           "/providers/Microsoft.Network/virtualNetworks/$SecondaryVirtualNetworkName"
+
+# --- Step 1: Register the existing delegated subnets with Power Platform -----
 
 Write-Host "`n[1/3] Registering subnet delegation (primary)..."
 Write-Host "      Subscription : $SubscriptionId"
@@ -119,6 +132,7 @@ Write-Host "      Subnet       : $SubnetName"
 if ($PSCmdlet.ShouldProcess("$VirtualNetworkName/$SubnetName", "New-VnetForSubnetDelegation")) {
     New-VnetForSubnetDelegation `
         -SubscriptionId     $SubscriptionId `
+        -ResourceGroupName  $ResourceGroupName `
         -VirtualNetworkName $VirtualNetworkName `
         -SubnetName         $SubnetName
 }
@@ -130,39 +144,54 @@ Write-Host "      Subnet: $SecondarySubnetName"
 if ($PSCmdlet.ShouldProcess("$SecondaryVirtualNetworkName/$SecondarySubnetName", "New-VnetForSubnetDelegation")) {
     New-VnetForSubnetDelegation `
         -SubscriptionId     $SubscriptionId `
+        -ResourceGroupName  $ResourceGroupName `
         -VirtualNetworkName $SecondaryVirtualNetworkName `
         -SubnetName         $SecondarySubnetName
 }
 
-# ─── Step 2: Create the enterprise policy ────────────────────────────────────
-# Docs: "Create your enterprise policy using the virtual networks and subnets you delegated."
-# US geography (unitedstates) requires both a primary (eastus) and secondary (westus) VNet.
-
-$VNetResourceId          = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName" +
-                           "/providers/Microsoft.Network/virtualNetworks/$VirtualNetworkName"
-$SecondaryVNetResourceId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName" +
-                           "/providers/Microsoft.Network/virtualNetworks/$SecondaryVirtualNetworkName"
+# --- Step 2: Create the enterprise policy ------------------------------------
 
 Write-Host "`n[2/3] Creating enterprise policy '$PolicyName'..."
-Write-Host "      Resource group       : $ResourceGroupName"
-Write-Host "      Policy location      : $PolicyLocation"
-Write-Host "      Primary VNet ID      : $VNetResourceId"
-Write-Host "      Secondary VNet ID    : $SecondaryVNetResourceId"
+Write-Host "      Resource group    : $ResourceGroupName"
+Write-Host "      Policy location   : $PolicyLocation"
+Write-Host "      Primary VNet ID   : $VNetResourceId"
+Write-Host "      Secondary VNet ID : $SecondaryVNetResourceId"
 
 if ($PSCmdlet.ShouldProcess($PolicyName, "New-SubnetInjectionEnterprisePolicy")) {
-    New-SubnetInjectionEnterprisePolicy `
-        -SubscriptionId            $SubscriptionId `
-        -ResourceGroupName         $ResourceGroupName `
-        -PolicyName                $PolicyName `
-        -PolicyLocation            $PolicyLocation `
-        -VirtualNetworkId          $VNetResourceId `
-        -SubnetName                $SubnetName `
-        -SecondaryVirtualNetworkId $SecondaryVNetResourceId `
-        -SecondarySubnetName       $SecondarySubnetName
+    $policyParams = @{
+        SubscriptionId    = $SubscriptionId
+        ResourceGroupName = $ResourceGroupName
+        PolicyName        = $PolicyName
+        PolicyLocation    = $PolicyLocation
+        VirtualNetworkId  = $VNetResourceId
+        SubnetName        = $SubnetName
+    }
+
+    # The secondary VNet parameter name varies across module versions - detect at runtime.
+    $cmdMeta = Get-Command New-SubnetInjectionEnterprisePolicy
+    if ($cmdMeta.Parameters.ContainsKey("VirtualNetworkId2")) {
+        # v0.12.0+ uses VirtualNetworkId2 / SubnetName2
+        $policyParams["VirtualNetworkId2"] = $SecondaryVNetResourceId
+        $policyParams["SubnetName2"]        = $SecondarySubnetName
+    }
+    elseif ($cmdMeta.Parameters.ContainsKey("SecondaryVirtualNetworkId")) {
+        $policyParams["SecondaryVirtualNetworkId"] = $SecondaryVNetResourceId
+        $policyParams["SecondarySubnetName"]        = $SecondarySubnetName
+    }
+    elseif ($cmdMeta.Parameters.ContainsKey("SecondaryVirtualNetworkResourceId")) {
+        $policyParams["SecondaryVirtualNetworkResourceId"] = $SecondaryVNetResourceId
+        $policyParams["SecondarySubnetName"]                = $SecondarySubnetName
+    }
+    else {
+        $available = ($cmdMeta.Parameters.Keys | Where-Object { $_ -like "*econdary*" -or $_ -like "*2" }) -join ", "
+        Write-Warning "Could not find a secondary VNet parameter (module v$($cmdMeta.Module.Version)). Available: $available"
+        Write-Warning "Proceeding without secondary VNet - update the parameter name in this script if needed."
+    }
+
+    New-SubnetInjectionEnterprisePolicy @policyParams
 }
 
-# ─── Step 3: Link the policy to the Power Platform environment ────────────────
-# Docs: "To link your newly created policy, run the following command."
+# --- Step 3: Link the policy to the Power Platform environment ----------------
 
 $PolicyArmId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName" +
                "/providers/Microsoft.PowerPlatform/enterprisePolicies/$PolicyName"

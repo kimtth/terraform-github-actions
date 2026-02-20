@@ -4,11 +4,13 @@ This is a sample repository that shows how to use **GitHub Actions workflows (CI
 
 > [!NOTE]
 > - Power Platform and the Azure subscription must be in the same Microsoft Entra tenant.  
-> - The single VNet scenario is only supported in regions listed under the [Supported regions](https://learn.microsoft.com/en-us/power-platform/admin/vnet-support-overview#supported-regions) documentation.  
-> - In most cases, you will need to deploy multiple VNets.
+> - The single VNet scenario is only supported in specific regions listed under the [Supported regions](https://learn.microsoft.com/en-us/power-platform/admin/vnet-support-overview#supported-regions) documentation.  
+> - In most cases, you will need to deploy multiple VNets.  
+> - A subnet can only be registered to one enterprise policy (cannot be shared across policies). For single-region geographies, one enterprise policy links to one subnet; for two-region geographies, one enterprise policy links to one subnet per region (primary + secondary). Multiple Power Platform environments can share the same enterprise policy and subnet — size each subnet accordingly (~25–30 IPs per production environment, ~6–10 per nonproduction environment).  
+> Subnet(s) <- 1:1 -> Enterprise Policy <- 1:N -> PPF Environments
 
 - [Terraform Azure Provider](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs)
-- [Azure Function App Documentation](https://learn.microsoft.com/en-us/azure/azure-functions/)
+- [Azure Container Instances Documentation](https://learn.microsoft.com/en-us/azure/container-instances/)
 - [Set up virtual network support for Power Platform](https://learn.microsoft.com/en-us/power-platform/admin/vnet-support-setup-configure)
 - [GitHub Actions Documentation](https://docs.github.com/en/actions)
 
@@ -36,7 +38,7 @@ flowchart TD
             direction LR
             NSG(["NSG: azppf-nsg"])
             PPFSUB["Subnet: ppf-subnet<br/>10.123.1.0/24<br/>Delegation: PowerPlatform"]
-            FNSUB["Subnet: fn-subnet<br/>10.123.2.0/24<br/>Delegation: Microsoft.Web"]
+            FNSUB["Subnet: fn-subnet<br/>10.123.2.0/24<br/>Delegation: ContainerInstance"]
             NSG --> PPFSUB
             NSG --> FNSUB
         end
@@ -50,24 +52,11 @@ flowchart TD
         end
         class VNET2 network
 
-        subgraph STORAGE ["Storage (azppfstorage{suffix})<br/>shared_access_key_enabled = false"]
+subgraph ACI ["Azure Container Instance (azppf-echo-cg)"]
             direction TB
-            CONT["Container: function-releases"]
-            BLOB["Blob: echo-function.zip"]
-            CONT --> BLOB
+            ECHO["Container: mendhak/http-https-echo<br/>0.5 vCPU / 0.5 GB — private IP only<br/>Port 8080"]
         end
-        class STORAGE storage
-
-        subgraph FN ["Azure Function App (azppf-echo-fn-{suffix})"]
-            direction TB
-            SP["Service Plan: EP1 / Linux"]
-            FNAPP["Linux Function App<br/>Python 3.12<br/>System-Assigned Managed Identity"]
-            SP --> FNAPP
-        end
-        class FN compute
-
-        ROLES[["RBAC Role Assignments<br/>Fn MI → Storage Blob Data Owner<br/>Fn MI → Storage Queue Data Contributor<br/>Fn MI → Storage Table Data Contributor<br/>TF runner → Storage Blob Data Contributor"]]
-        class ROLES rbac
+        class ACI compute
     end
     class RG azure
 
@@ -80,20 +69,17 @@ flowchart TD
     class PPF powerplatform
 
     GH -- "OIDC / Workload Identity Federation" --> RG
-    FNAPP -- "VNet Integration" --> FNSUB
-    FNAPP -.->|"Reads package blob via MI"| BLOB
-    ROLES -.-> STORAGE
-    ROLES -.-> FNAPP
+    ECHO -- "VNet Injection" --> FNSUB
     PPFSUB -- "Subnet Injection (primary)" --> EP
     PPFSUB2 -- "Subnet Injection (secondary)" --> EP
 ```
 
-### 1. Create `variables.secret.tfvars`
+### 1. Create `variables.auto.tfvars`
 
 This file is gitignored and must be created manually. It holds secrets and deployment-mode flags.
 
 ```hcl
-# variables.secret.tfvars
+# variables.auto.tfvars
 
 # Azure identity — see "How to find AZURE_CLIENT_ID" below
 tenant_id       = "<your-azure-tenant-id>"
@@ -173,7 +159,7 @@ Go to **Settings → Secrets and variables → Actions** in your repository and 
 | `AZURE_CLIENT_ID` | `appId` from app registration (step 2) |
 | `AZURE_SUBSCRIPTION_ID` | `az account show` |
 | `AZURE_TENANT_ID` | `az account show` |
-| `POWERPLATFORM_ENVIRONMENT_ID` | Power Platform admin center — **Environments → Settings → Details → Environment ID** (GUID only, no `Default-` prefix) |
+| `POWERPLATFORM_ENVIRONMENT_ID` | Power Platform admin center — **Environments → Settings → Details → Environment ID**. Use the full `Default-<guid>` format (e.g. `Default-e25f...`). You can also copy it from the environment URL: `https://make.powerapps.com/environments/Default-<guid>/...` |
 
 **Variables** (non-sensitive configuration):
 
@@ -223,21 +209,27 @@ To decommission VNet integration and destroy all infrastructure:
 terraform destroy
 ```
 
-### 5. Call Azure Function
+### 5. Call the Echo Container
 
-The Azure Function App API can be called using the following URL:
+The ACI echo container has a **private IP only** — reachable exclusively from within the VNet.
+After `terraform apply`, the private IP is printed as a Terraform output:
 
-```
-https://your-function-app-endpoint.azurewebsites.net/api/echo
+```bash
+terraform output echo_private_ip
 ```
 
 To test the connection between Azure and Power Platform, use a Power Apps Canvas App located in the `powerapps` directory.
 
 1. Navigate to: [https://make.powerapps.com](https://make.powerapps.com)
 2. Import the `HelloAzureSolution.zip` solution file in `powerapps` directory
-3. Update the `AzureFunctionBaseUrl` environment variable in the solution with your Azure Function App URL.
+3. Update the `AzureFunctionBaseUrl` environment variable in the solution with `https://<echo_private_ip>:8443`.
 4. Open the Power App.
-5. Click the **Echo** button to call the API hosted in the Azure Function App. The response from the API will be displayed in the purple area.
+5. Click the **Echo** button to call the API via the VNet tunnel. The response from the API will be displayed in the purple area.
+
+```bash
+> az container logs --name azppf-echo-cg --resource-group azppf-rg                                                                                         
+Listening on ports 8080 for http, and 8443 for https.
+```
 
 <img src="powerapps/image.png" alt="Power Apps Screenshot" width="50%">
 

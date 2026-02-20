@@ -73,13 +73,6 @@ variable "dev_source_address_prefix" {
   default     = "*"
 }
 
-# ─── Azure Functions ──────────────────────────────────────────────────────────
-
-variable "service_plan_name" {
-  type    = string
-  default = "azppf-service-plan"
-}
-
 # ─── Monitoring ───────────────────────────────────────────────────────────────
 
 variable "log_analytics_workspace_name" {
